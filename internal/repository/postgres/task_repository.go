@@ -10,22 +10,27 @@ import (
 	taskdomain "example.com/taskservice/internal/domain/task"
 )
 
-type Repository struct {
+type TaskRepository struct {
 	pool *pgxpool.Pool
 }
 
-func New(pool *pgxpool.Pool) *Repository {
-	return &Repository{pool: pool}
+func NewTaskRepository(pool *pgxpool.Pool) *TaskRepository {
+	return &TaskRepository{pool: pool}
 }
 
-func (r *Repository) Create(ctx context.Context, task *taskdomain.Task) (*taskdomain.Task, error) {
+// ========== СТАРЫЕ МЕТОДЫ ==========
+
+func (r *TaskRepository) Create(ctx context.Context, task *taskdomain.Task) (*taskdomain.Task, error) {
 	const query = `
-		INSERT INTO tasks (title, description, status, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, title, description, status, created_at, updated_at
+		INSERT INTO tasks (title, description, status, due_date, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, title, description, status, due_date, created_at, updated_at
 	`
 
-	row := r.pool.QueryRow(ctx, query, task.Title, task.Description, task.Status, task.CreatedAt, task.UpdatedAt)
+	row := r.pool.QueryRow(ctx, query,
+		task.Title, task.Description, task.Status, task.DueDate,
+		task.CreatedAt, task.UpdatedAt)
+
 	created, err := scanTask(row)
 	if err != nil {
 		return nil, err
@@ -34,9 +39,9 @@ func (r *Repository) Create(ctx context.Context, task *taskdomain.Task) (*taskdo
 	return created, nil
 }
 
-func (r *Repository) GetByID(ctx context.Context, id int64) (*taskdomain.Task, error) {
+func (r *TaskRepository) GetByID(ctx context.Context, id int64) (*taskdomain.Task, error) {
 	const query = `
-		SELECT id, title, description, status, created_at, updated_at
+		SELECT id, title, description, status, due_date, created_at, updated_at
 		FROM tasks
 		WHERE id = $1
 	`
@@ -47,38 +52,40 @@ func (r *Repository) GetByID(ctx context.Context, id int64) (*taskdomain.Task, e
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, taskdomain.ErrNotFound
 		}
-
 		return nil, err
 	}
 
 	return found, nil
 }
 
-func (r *Repository) Update(ctx context.Context, task *taskdomain.Task) (*taskdomain.Task, error) {
+func (r *TaskRepository) Update(ctx context.Context, task *taskdomain.Task) (*taskdomain.Task, error) {
 	const query = `
 		UPDATE tasks
 		SET title = $1,
 			description = $2,
 			status = $3,
-			updated_at = $4
-		WHERE id = $5
-		RETURNING id, title, description, status, created_at, updated_at
+			due_date = $4,
+			updated_at = $5
+		WHERE id = $6
+		RETURNING id, title, description, status, due_date, created_at, updated_at
 	`
 
-	row := r.pool.QueryRow(ctx, query, task.Title, task.Description, task.Status, task.UpdatedAt, task.ID)
+	row := r.pool.QueryRow(ctx, query,
+		task.Title, task.Description, task.Status, task.DueDate,
+		task.UpdatedAt, task.ID)
+
 	updated, err := scanTask(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, taskdomain.ErrNotFound
 		}
-
 		return nil, err
 	}
 
 	return updated, nil
 }
 
-func (r *Repository) Delete(ctx context.Context, id int64) error {
+func (r *TaskRepository) Delete(ctx context.Context, id int64) error {
 	const query = `DELETE FROM tasks WHERE id = $1`
 
 	result, err := r.pool.Exec(ctx, query, id)
@@ -93,9 +100,9 @@ func (r *Repository) Delete(ctx context.Context, id int64) error {
 	return nil
 }
 
-func (r *Repository) List(ctx context.Context) ([]taskdomain.Task, error) {
+func (r *TaskRepository) List(ctx context.Context) ([]taskdomain.Task, error) {
 	const query = `
-		SELECT id, title, description, status, created_at, updated_at
+		SELECT id, title, description, status, due_date, created_at, updated_at
 		FROM tasks
 		ORDER BY id DESC
 	`
@@ -112,7 +119,6 @@ func (r *Repository) List(ctx context.Context) ([]taskdomain.Task, error) {
 		if err != nil {
 			return nil, err
 		}
-
 		tasks = append(tasks, *task)
 	}
 
@@ -122,6 +128,70 @@ func (r *Repository) List(ctx context.Context) ([]taskdomain.Task, error) {
 
 	return tasks, nil
 }
+
+// ========== НОВЫЕ МЕТОДЫ ДЛЯ ПЕРИОДИЧНОСТИ ==========
+
+func (r *TaskRepository) CreateRecurrence(ctx context.Context, taskTemplateID, recurrenceType, value string) (int64, error) {
+	const query = `
+		INSERT INTO recurrences (task_template_id, type, value)
+		VALUES ($1, $2, $3)
+		RETURNING id
+	`
+
+	var id int64
+	err := r.pool.QueryRow(ctx, query, taskTemplateID, recurrenceType, value).Scan(&id)
+	if err != nil {
+		return 0, err
+	}
+
+	return id, nil
+}
+
+func (r *TaskRepository) CreateRecurrenceTask(ctx context.Context, task *taskdomain.Task, recurrenceID int64, templateID string) (*taskdomain.Task, error) {
+	const query = `
+		INSERT INTO tasks (title, description, status, due_date, created_at, updated_at, recurrence_id, is_recurrence_instance, template_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8)
+		RETURNING id, title, description, status, due_date, created_at, updated_at
+	`
+
+	row := r.pool.QueryRow(ctx, query,
+		task.Title, task.Description, task.Status, task.DueDate,
+		task.CreatedAt, task.UpdatedAt,
+		recurrenceID, templateID)
+
+	created, err := scanTask(row)
+	if err != nil {
+		return nil, err
+	}
+
+	return created, nil
+}
+
+func (r *TaskRepository) ExistsByTemplateAndDate(ctx context.Context, templateID string, dueDate interface{}) (bool, error) {
+	const query = `
+		SELECT EXISTS(
+			SELECT 1 FROM tasks 
+			WHERE template_id = $1 AND due_date::date = $2::date
+		)
+	`
+
+	var exists bool
+	err := r.pool.QueryRow(ctx, query, templateID, dueDate).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+
+	return exists, nil
+}
+
+func (r *TaskRepository) DeleteByTemplateID(ctx context.Context, templateID string) error {
+	const query = `DELETE FROM tasks WHERE template_id = $1`
+
+	_, err := r.pool.Exec(ctx, query, templateID)
+	return err
+}
+
+// ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 
 type taskScanner interface {
 	Scan(dest ...any) error
@@ -138,6 +208,7 @@ func scanTask(scanner taskScanner) (*taskdomain.Task, error) {
 		&task.Title,
 		&task.Description,
 		&status,
+		&task.DueDate,
 		&task.CreatedAt,
 		&task.UpdatedAt,
 	); err != nil {

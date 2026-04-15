@@ -35,7 +35,8 @@ func main() {
 	}
 	defer pool.Close()
 
-	taskRepo := postgresrepo.New(pool)
+	// ИСПРАВЛЕНО: NewTaskRepository вместо New
+	taskRepo := postgresrepo.NewTaskRepository(pool)
 	taskUsecase := task.NewService(taskRepo)
 	taskHandler := httphandlers.NewTaskHandler(taskUsecase)
 	docsHandler := swaggerdocs.NewHandler()

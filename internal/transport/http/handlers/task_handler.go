@@ -3,8 +3,10 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gorilla/mux"
 
@@ -27,10 +29,27 @@ func (h *TaskHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ЛОГИРОВАНИЕ
+	fmt.Printf("DEBUG: Received due_date string = %q\n", req.DueDate)
+
+	// Парсим due_date
+	var dueDate time.Time
+	if req.DueDate != "" {
+		var err error
+		dueDate, err = time.Parse("2006-01-02", req.DueDate)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, errors.New("invalid due_date format, use YYYY-MM-DD"))
+			return
+		}
+	}
+
+	fmt.Printf("DEBUG: Parsed due_date = %v\n", dueDate)
+
 	created, err := h.usecase.Create(r.Context(), taskusecase.CreateInput{
 		Title:       req.Title,
 		Description: req.Description,
 		Status:      req.Status,
+		DueDate:     dueDate,
 	})
 	if err != nil {
 		writeUsecaseError(w, err)
@@ -38,6 +57,59 @@ func (h *TaskHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, newTaskDTO(created))
+}
+
+// НОВЫЙ МЕТОД для создания периодических задач
+func (h *TaskHandler) CreateRecurring(w http.ResponseWriter, r *http.Request) {
+	var req recurringTaskRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	// Валидация
+	if req.Title == "" {
+		writeError(w, http.StatusBadRequest, errors.New("title is required"))
+		return
+	}
+
+	if req.DueDate == "" {
+		writeError(w, http.StatusBadRequest, errors.New("due_date is required"))
+		return
+	}
+
+	// Парсим due_date
+	dueDate, err := time.Parse("2006-01-02", req.DueDate)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("invalid due_date format, use YYYY-MM-DD"))
+		return
+	}
+
+	// Валидация recurrence
+	if req.Recurrence == nil {
+		writeError(w, http.StatusBadRequest, errors.New("recurrence config is required"))
+		return
+	}
+
+	if req.Recurrence.Type == "" {
+		writeError(w, http.StatusBadRequest, errors.New("recurrence.type is required"))
+		return
+	}
+
+	// Создаем периодические задачи
+	tasks, err := h.usecase.CreateRecurringTasks(r.Context(), taskusecase.CreateRecurringInput{
+		Title:       req.Title,
+		Description: req.Description,
+		DueDate:     dueDate,
+		Recurrence:  req.Recurrence,
+	})
+	if err != nil {
+		writeUsecaseError(w, err)
+		return
+	}
+
+	// Возвращаем массив созданных задач
+	writeJSON(w, http.StatusCreated, newTasksDTO(tasks))
 }
 
 func (h *TaskHandler) GetByID(w http.ResponseWriter, r *http.Request) {
@@ -69,10 +141,22 @@ func (h *TaskHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Парсим due_date
+	var dueDate time.Time
+	if req.DueDate != "" {
+		var err error
+		dueDate, err = time.Parse("2006-01-02", req.DueDate)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, errors.New("invalid due_date format, use YYYY-MM-DD"))
+			return
+		}
+	}
+
 	updated, err := h.usecase.Update(r.Context(), id, taskusecase.UpdateInput{
 		Title:       req.Title,
 		Description: req.Description,
 		Status:      req.Status,
+		DueDate:     dueDate,
 	})
 	if err != nil {
 		writeUsecaseError(w, err)
